@@ -1,0 +1,131 @@
+use ripemd::Ripemd160;
+use rsa::pkcs1::LineEnding::LF;
+use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
+use rsa::pkcs1v15::{Signature, SigningKey, VerifyingKey};
+use rsa::pkcs8::EncodePublicKey;
+use rsa::signature::{Keypair, RandomizedSigner, SignatureEncoding, Verifier};
+use rsa::RsaPrivateKey;
+use rsa::RsaPublicKey;
+use rsa::{pkcs1, Pkcs1v15Sign};
+use serde::{Deserialize, Serialize};
+use sha2::digest::{FixedOutput, FixedOutputReset, Update};
+use sha2::{Digest, Sha256};
+
+fn main() {
+    let (private_key, public_key) = get_keypair("jay");
+    let address = key_to_address(&public_key);
+    println!("address: {}", address);
+
+    let (paul_private_key, paul_public_key) = get_keypair("paul");
+    let (transaction, v_key) = generate_p2pkh_transaction(paul_private_key, address, 15).unwrap();
+    send_transaction(transaction, v_key);
+}
+
+fn send_transaction(transaction: Transaction, verifying_key: VerifyingKey<Sha256>) {
+    let serialized_transaction =
+        serde_json::to_string(&transaction).expect("failed to serialize transaction");
+
+    let mut stream = std::net::TcpStream::connect("127.0.0.1:11111").expect("failed to connect");
+}
+
+fn generate_key(name: &str) {
+    let mut rng = rand::thread_rng();
+    let bits = 2048;
+    let private_key = RsaPrivateKey::new(&mut rng, bits).expect("failed to generate a key");
+
+    EncodeRsaPrivateKey::write_pkcs1_pem_file(&private_key, name, LF).expect("failed to write key");
+}
+
+fn get_keypair(name: &str) -> (RsaPrivateKey, RsaPublicKey) {
+    let private_key: RsaPrivateKey =
+        pkcs1::DecodeRsaPrivateKey::read_pkcs1_pem_file(name).expect("failed to read key");
+    let public_key: RsaPublicKey = (&private_key).into();
+    (private_key, public_key)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Transaction {
+    txid: String,
+    signature: Signature,
+    inputs: Vec<String>,
+    outputs: Vec<Output>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Output {
+    recipient: String,
+    amount: u64,
+}
+
+fn generate_p2pkh_transaction(
+    private_key: RsaPrivateKey,
+    recepient: String,
+    amount: u64,
+) -> Option<(Transaction, VerifyingKey<Sha256>)> {
+    let mut rng = rand::thread_rng();
+    let sender_address = key_to_address(&private_key.to_public_key());
+    let utxos = get_utxos(&sender_address);
+    let mut inputs_amount = 0;
+    let inputs = utxos
+        .iter()
+        .filter_map(|(txid, input_amount)| {
+            if inputs_amount < amount {
+                inputs_amount += input_amount;
+                Some(txid.to_string())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if inputs_amount < amount {
+        return None;
+    }
+
+    let mut outputs = vec![Output {
+        recipient: recepient.clone(),
+        amount,
+    }];
+
+    if inputs_amount > amount {
+        outputs.push(Output {
+            recipient: sender_address,
+            amount: inputs_amount - amount,
+        });
+    }
+
+    let txid = hash_txid(&inputs, &outputs);
+    let signing_key = SigningKey::<Sha256>::new(private_key);
+    let verifying_key = signing_key.verifying_key();
+    let signature = signing_key.sign_with_rng(&mut rng, txid.clone().as_bytes());
+
+    let transaction = Transaction {
+        txid,
+        signature,
+        inputs,
+        outputs,
+    };
+
+    Some((transaction, verifying_key))
+}
+
+fn get_utxos(address: &str) -> Vec<(String, u64)> {
+    vec![(String::from("aaaaaaaaaaaaaaaa"), 20)]
+}
+
+fn key_to_address(public_key: &RsaPublicKey) -> String {
+    let der = EncodePublicKey::to_public_key_der(public_key).expect("failed to encode key");
+    let ripemd160 = <Ripemd160 as Digest>::digest(<Sha256 as Digest>::digest(der.as_bytes()));
+    let mut adr = ripemd160.to_vec();
+    adr.insert(0, 0);
+    let checksum = <Sha256 as Digest>::digest(<Sha256 as Digest>::digest(adr.clone()));
+    adr.extend_from_slice(&checksum[..4]);
+    bs58::encode(adr).into_string()
+}
+
+fn hash_txid(inputs: &Vec<String>, outputs: &[Output]) -> String {
+    let serialized_inputs = serde_json::to_string(inputs).expect("failed to serialize inputs");
+    let serialized_outputs = serde_json::to_string(outputs).expect("failed to serialize inputs");
+
+
+}
